@@ -42,12 +42,16 @@ async function enqueueBulkMedia(numbers, fileBuffer, mimeType, filename, caption
   return queue.enqueueMedia(numbers, fileBuffer, mimeType, filename, caption, sessionName, ownership);
 }
 
-async function getQueueStatus(filter, sessionName) {
-  return queue.getJobs(filter, sessionName);
+async function getQueueStatus(filter, sessionName, tenantFilter) {
+  return queue.getJobs(filter, sessionName, tenantFilter);
 }
 
 async function getJobById(jobId) {
   return queue.getJob(jobId);
+}
+
+async function stopCampaign(sessionName, tenantFilter) {
+  return queue.stopCampaign(sessionName, tenantFilter);
 }
 
 module.exports = {
@@ -58,4 +62,5 @@ module.exports = {
   enqueueBulkRecipients,
   getQueueStatus,
   getJobById,
+  stopCampaign,
 };

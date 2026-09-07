@@ -28,6 +28,7 @@ const {
   bulkSendCsv,
   getQueue,
   getQueueJob,
+  stopCampaign,
 } = require('../controllers/messageController');
 
 const {
@@ -240,6 +241,15 @@ router.get(
   logApiRequest,
   resolveDevice,
   getQueue
+);
+
+router.post(
+  '/devices/:token/queue/stop',
+  authenticateEither,
+  customerRateLimit,
+  logApiRequest,
+  resolveDevice,
+  stopCampaign
 );
 
 router.get(

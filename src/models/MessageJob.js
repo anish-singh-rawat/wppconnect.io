@@ -18,13 +18,13 @@ const messageJobSchema = new mongoose.Schema(
     city:        { type: String, default: null },
     status: {
       type:    String,
-      enum:    ['pending', 'sending', 'sent', 'failed', 'duplicate', 'skipped'],
+      enum:    ['pending', 'sending', 'sent', 'failed', 'duplicate', 'skipped', 'cancelled'],
       default: 'pending',
       index:   true,
     },
     attempts:    { type: Number, default: 0 },
     error:       { type: String, default: null },
-    enqueuedAt:  { type: Date, default: Date.now },
+    enqueuedAt:  { type: Date, default: Date.now, index: true },
     processedAt: { type: Date, default: null },
 
     customerId: {
@@ -56,5 +56,9 @@ messageJobSchema.index({ dedupKey: 1, status: 1 });
 messageJobSchema.index({ customerId: 1, status: 1 });
 messageJobSchema.index({ customerId: 1, sessionName: 1 });
 messageJobSchema.index({ customerId: 1, subCustomerId: 1, status: 1 });
+messageJobSchema.index({ sessionName: 1, enqueuedAt: -1 });
+messageJobSchema.index({ sessionName: 1, status: 1, enqueuedAt: 1 });
+messageJobSchema.index({ customerId: 1, enqueuedAt: -1 });
+messageJobSchema.index({ enqueuedAt: -1 });
 
 module.exports = mongoose.model('MessageJob', messageJobSchema);

@@ -8,6 +8,7 @@ const {
   enqueueBulkRecipients,
   getQueueStatus,
   getJobById,
+  stopCampaign: messagingServiceStopCampaign,
 } = require('../services/messagingService');
 const { parseCsvNumbers, parseCsvRecipients } = require('../utils/csvParser');
 const { isNonEmptyString, isNonEmptyArray } = require('../utils/helpers');
@@ -363,6 +364,27 @@ async function getQueueJob(req, res) {
   }
 }
 
+async function stopCampaign(req, res) {
+  try {
+    const { sessionName } = req;
+    await validateSessionOwnership(req);
+
+    const tenantFilter = buildTenantFilter(req);
+    const result = await messagingServiceStopCampaign(sessionName, tenantFilter);
+
+    return res.json({
+      success: true,
+      message: 'Campaign stopped successfully.',
+      session: sessionName,
+      stoppedCount: result.stoppedCount,
+    });
+  } catch (err) {
+    logger.error(`[Controller] stopCampaign error: ${err.message}`);
+    const status = err.status || 500;
+    return res.status(status).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   sendMessage,
   sendMediaMessage,
@@ -371,4 +393,5 @@ module.exports = {
   bulkSendCsv,
   getQueue,
   getQueueJob,
+  stopCampaign,
 };

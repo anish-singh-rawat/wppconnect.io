@@ -13,6 +13,7 @@ class MessageQueue {
     this._pendingIds  = [];
     this._processing  = false;
     this._sessionProcessing = new Map();
+    this._sessionStopped = new Map();
   }
 
   async enqueue(numbers, message, sessionName, ownership = {}) {
@@ -149,12 +150,42 @@ class MessageQueue {
     const query = {};
     if (sessionName) query.sessionName = sessionName;
     if (filter !== 'all') query.status = filter;
-    if (tenantFilter) Object.assign(query, tenantFilter);
+    if (tenantFilter && Object.keys(tenantFilter).length > 0) Object.assign(query, tenantFilter);
 
-    const jobs = await MessageJob.find(query).sort({ enqueuedAt: -1 }).lean();
+    const jobs = await MessageJob.find(query)
+      .select('-mediaData')
+      .sort({ enqueuedAt: -1 })
+      .limit(1000)
+      .lean();
     return jobs.map((j) => this._toPlain(j));
   }
 
+  async getJob(jobId) {
+    const job = await MessageJob.findById(jobId).select('-mediaData').lean();
+    return job ? this._toPlain(job) : null;
+  }
+
+  async stopCampaign(sessionName, tenantFilter = null) {
+    this._sessionStopped.set(sessionName, true);
+
+    const query = { sessionName, status: 'pending' };
+    if (tenantFilter && Object.keys(tenantFilter).length > 0) {
+      Object.assign(query, tenantFilter);
+    }
+
+    const result = await MessageJob.updateMany(
+      query,
+      { $set: { status: 'cancelled', processedAt: new Date() } }
+    );
+
+    this._pendingIds = [];
+
+    logger.info(`[Queue] Stopped campaign for "${sessionName}". Cancelled ${result.modifiedCount} pending job(s).`);
+
+    socketManager.emitQueueUpdate(sessionName, { cancelled: result.modifiedCount });
+
+    return { stoppedCount: result.modifiedCount };
+  }
 
   async recoverPendingJobs() {
     await MessageJob.updateMany(
@@ -192,11 +223,13 @@ class MessageQueue {
   async _processSession(sessionName) {
     if (this._sessionProcessing.get(sessionName)) return;
     this._sessionProcessing.set(sessionName, true);
+    this._sessionStopped.delete(sessionName);
 
     while (true) {
-      const idx = this._pendingIds.findIndex(async (id) => {
-        return true;
-      });
+      if (this._sessionStopped.get(sessionName)) {
+        this._sessionStopped.delete(sessionName);
+        break;
+      }
 
       const job = await MessageJob.findOne({
         sessionName,
@@ -209,6 +242,11 @@ class MessageQueue {
       if (pos !== -1) this._pendingIds.splice(pos, 1);
 
       await this._sendWithRetry(job);
+
+      if (this._sessionStopped.get(sessionName)) {
+        this._sessionStopped.delete(sessionName);
+        break;
+      }
 
       const remaining = await MessageJob.countDocuments({ sessionName, status: 'pending' });
       if (remaining === 0) break;
