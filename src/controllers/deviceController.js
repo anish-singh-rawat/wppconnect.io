@@ -148,7 +148,8 @@ async function deleteDeviceHandler(req, res) {
       return res.status(404).json({ success: false, error: 'Device not found.' });
     }
 
-    await stopSession(device.sessionName);
+    logger.info(`[Device] Disconnecting WhatsApp session for "${device.sessionName}"...`);
+    await stopSession(device.sessionName, true);
 
 
     const sessionFolder = path.resolve(config.whatsapp.sessionPath, device.sessionName);

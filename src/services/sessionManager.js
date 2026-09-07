@@ -97,14 +97,14 @@ function startNewSession(sessionName) {
   startSession(sessionName);
 }
 
-async function stopSession(sessionName) {
+async function stopSession(sessionName, logoutFromWhatsApp = false) {
   launching.delete(sessionName);
   if (retryTimers.has(sessionName)) {
     clearTimeout(retryTimers.get(sessionName));
     retryTimers.delete(sessionName);
   }
   if (sessions.has(sessionName)) {
-    try { await sessions.get(sessionName).close(); } catch (_) {}
+    try { await sessions.get(sessionName).close(logoutFromWhatsApp); } catch (_) {}
     removeSession(sessionName);
   }
 }

@@ -291,7 +291,22 @@ class WhatsAppClient {
 
   onMessage(handler) {}
 
-  async close() {
+  async logout() {
+    if (this.sock && this.isReady) {
+      try {
+        logger.info(`[WhatsApp:${this.sessionName}] Logging out from WhatsApp...`);
+        await this.sock.logout();
+        logger.info(`[WhatsApp:${this.sessionName}] Logged out from WhatsApp.`);
+      } catch (err) {
+        logger.warn(`[WhatsApp:${this.sessionName}] Logout error (ignored): ${err.message}`);
+      }
+    }
+  }
+
+  async close(logoutFromWhatsApp = false) {
+    if (logoutFromWhatsApp) {
+      await this.logout();
+    }
     this.destroyed = true;
     this.isReady   = false;
     this.status    = 'disconnected';
