@@ -32,7 +32,7 @@ async function startSession(sessionName, attempt = 1) {
 
   logger.info(`[SessionMgr] Starting "${sessionName}" (attempt #${attempt})...`);
 
-  if (attempt > 1 && sessions.has(sessionName)) {
+  if (sessions.has(sessionName)) {
     try { await sessions.get(sessionName).close(); } catch (_) {}
   }
 
@@ -45,6 +45,7 @@ async function startSession(sessionName, attempt = 1) {
 
   session.init()
     .then(() => {
+      launching.delete(sessionName);
       logger.info(`[SessionMgr] "${sessionName}" init() done — awaiting WS open.`);
     })
     .catch((err) => {

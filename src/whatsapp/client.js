@@ -10,6 +10,7 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  Browsers,
 } = require('@whiskeysockets/baileys');
 
 const config = require('../config');
@@ -38,6 +39,8 @@ class WhatsAppClient {
     this._version    = null;
     this._qrExpireTimer = null;
     this._qrListeners = new Set();
+    this._reconnectTimer = null;
+    this._reconnectAttempts = 0;
 
     this.authDir = path.resolve(config.whatsapp.sessionPath, this.sessionName);
   }
@@ -48,7 +51,8 @@ class WhatsAppClient {
       const credsPath = path.join(this.authDir, 'creds.json');
       if (!fs.existsSync(credsPath)) return false;
       const data = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
-      return data.registered === true;
+      // A session is valid if explicitly marked registered, or has account/me data
+      return Boolean(data && (data.registered === true || data.me?.id || data.account));
     } catch (_) {
       return false;
     }
@@ -111,27 +115,27 @@ class WhatsAppClient {
     logger.info(`[WhatsApp:${this.sessionName}] Initialising (Baileys)...`);
     this.status = 'launching';
 
-    // CRITICAL: If there is no valid registered session, clear any stale creds
-    // so Baileys emits QR immediately instead of hanging for 30+ seconds
-    if (!this._hasValidSession()) {
+    const hasSession = this._hasValidSession();
+
+    // If there is no valid authenticated session on disk, clear any stale incomplete files
+    // so Baileys emits QR immediately instead of hanging
+    if (!hasSession) {
       this._clearAuth();
     }
 
     fs.mkdirSync(this.authDir, { recursive: true });
 
-    const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-    this._state     = state;
-    this._saveCreds = saveCreds;
-
     await this._ensureVersion();
 
-    this._openSocket();
+    await this._openSocket();
 
-    // Wait up to 5 seconds for the QR so callers get it immediately
-    await this._waitForQR(5000);
+    // If there was no existing session, wait up to 5 seconds for the QR so callers get it immediately
+    if (!hasSession) {
+      await this._waitForQR(5000);
+    }
   }
 
-  _openSocket() {
+  async _openSocket() {
     if (this.destroyed) return;
 
     if (this.sock) {
@@ -142,6 +146,13 @@ class WhatsAppClient {
       this.sock = null;
     }
 
+    // Refresh auth state from disk
+    const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+    this._state     = state;
+    this._saveCreds = saveCreds;
+
+    await this._ensureVersion();
+
     const sock = makeWASocket({
       version:                      this._version,
       logger:                       baileysLogger,
@@ -149,21 +160,27 @@ class WhatsAppClient {
         creds: this._state.creds,
         keys:  makeCacheableSignalKeyStore(this._state.keys, baileysLogger),
       },
-      browser:                      ['WhatsApp', 'Chrome', '3.0'],
+      browser:                      Browsers.ubuntu('Chrome'),
       printQRInTerminal:            false,
-      keepAliveIntervalMs:          25_000,
+      keepAliveIntervalMs:          30_000,
       retryRequestDelayMs:          2_000,
-      markOnlineOnConnect:          false,
+      markOnlineOnConnect:          true,
       generateHighQualityLinkPreview: false,
       syncFullHistory:              false,
       fireInitQueries:              true,
-      maxMsgRetryCount:             3,
+      maxMsgRetryCount:             5,
       emitOwnEvents:                true,
     });
 
     this.sock = sock;
 
-    sock.ev.on('creds.update', this._saveCreds);
+    sock.ev.on('creds.update', async () => {
+      try {
+        await this._saveCreds();
+      } catch (err) {
+        logger.error(`[WhatsApp:${this.sessionName}] Error saving creds: ${err.message}`);
+      }
+    });
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
@@ -202,10 +219,24 @@ class WhatsAppClient {
       }
 
       if (connection === 'open') {
-        this.isReady  = true;
-        this.latestQR = null;
-        this.status   = 'connected';
+        this.isReady            = true;
+        this.latestQR           = null;
+        this.status             = 'connected';
+        this._reconnectAttempts = 0;
+        if (this._reconnectTimer) {
+          clearTimeout(this._reconnectTimer);
+          this._reconnectTimer = null;
+        }
         logger.info(`[WhatsApp:${this.sessionName}] Connected ✓`);
+
+        // Ensure registered flag is saved in creds
+        if (this._state?.creds && !this._state.creds.registered) {
+          this._state.creds.registered = true;
+          try {
+            await this._saveCreds();
+          } catch (_) {}
+        }
+
         // Notify _waitForQR listeners that we are connected (no QR needed)
         this._notifyQRListeners('connected', null);
         try {
@@ -232,8 +263,11 @@ class WhatsAppClient {
           return;
         }
 
-        if (statusCode === DisconnectReason.loggedOut) {
-          logger.warn(`[WhatsApp:${this.sessionName}] Logged out — clearing auth & restarting.`);
+        // Check if this is an intentional logout from WhatsApp (e.g. mobile app -> Linked Devices -> Log out)
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+
+        if (isLoggedOut) {
+          logger.warn(`[WhatsApp:${this.sessionName}] Logged out by WhatsApp/user — clearing auth & restarting.`);
           this.status = 'qr_pending';
           this._clearAuth();
           try {
@@ -246,21 +280,36 @@ class WhatsAppClient {
           return;
         }
 
-        if (statusCode === DisconnectReason.restartRequired) {
-          logger.info(`[WhatsApp:${this.sessionName}] Restart required — reopening socket...`);
-          this.status = 'connecting';
-          setTimeout(() => this._openSocket(), 1_500);
-          return;
-        }
+        // For all other reasons (connectionClosed: 428, connectionLost: 408, timedOut: 408,
+        // restartRequired: 515, unavailableService: 503, badSession: 500, network drop, etc.):
+        // We MUST reconnect automatically without wiping auth or resetting session!
+        this.status = 'connecting';
+        this._reconnectAttempts++;
 
-        this.status = 'retrying';
+        // Exponential backoff: 1.5s, 3s, 6s, 12s, max 30s
+        const delay = statusCode === DisconnectReason.restartRequired
+          ? 1_500
+          : Math.min(1_500 * Math.pow(2, Math.min(this._reconnectAttempts - 1, 4)), 30_000);
+
+        logger.info(
+          `[WhatsApp:${this.sessionName}] Reconnecting socket in ${delay}ms (attempt #${this._reconnectAttempts})...`
+        );
+
         try {
           require('../controllers/qrController')
-            .notifyStatusForSession(this.sessionName, 'retrying');
+            .notifyStatusForSession(this.sessionName, 'connecting');
         } catch (_) {}
-        try {
-          require('../services/sessionManager').restartSession(this.sessionName);
-        } catch (_) {}
+
+        if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+        this._reconnectTimer = setTimeout(async () => {
+          if (!this.destroyed) {
+            try {
+              await this._openSocket();
+            } catch (err) {
+              logger.error(`[WhatsApp:${this.sessionName}] _openSocket reconnect error: ${err.message}`);
+            }
+          }
+        }, delay);
       }
     });
 
@@ -313,6 +362,10 @@ class WhatsAppClient {
     if (this._qrExpireTimer) {
       clearTimeout(this._qrExpireTimer);
       this._qrExpireTimer = null;
+    }
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
     }
     this.latestQR = null;
     if (this.sock) {
